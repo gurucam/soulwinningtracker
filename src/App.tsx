@@ -621,7 +621,24 @@ type AppData = {
   statsViews: StatsView[]
 }
 
+type UserSyncState = {
+  signature: string
+  synced_at: string
+  uploaded_at: string
+  downloaded_at: string
+}
+
+type SyncStateStore = Record<string, UserSyncState>
+
+type RollbackSnapshot = {
+  saved_at: string
+  reason: string
+  data: AppData
+}
+
 const STORAGE_KEY = "soulwinning-tracker-data-v1"
+const SYNC_STATE_KEY = "soulwinning-tracker-sync-state-v1"
+const ROLLBACK_KEY = "soulwinning-tracker-rollback-v1"
 const THEME_MODE_KEY = "soulwinning_theme"
 const THEME_NAME_KEY = "soulwinning_theme_name"
 const SUPABASE_SNAPSHOT_TABLE = "user_snapshots"
@@ -686,6 +703,77 @@ const formatTimestampLabel = (value: string) => {
   const parsed = Date.parse(value)
   if (!Number.isFinite(parsed)) return ""
   return dateTimeFormatter.format(new Date(parsed))
+}
+
+const buildCloudSignature = (userId: string, data: AppData) => `${userId}:${JSON.stringify(data)}`
+
+const hasMeaningfulData = (data: AppData) =>
+  data.sessions.length > 0 || data.people.length > 0 || data.tags.length > 0 || data.goals.length > 0
+
+const loadSyncStateStore = (): SyncStateStore => {
+  if (typeof localStorage === "undefined") return {}
+  try {
+    const raw = localStorage.getItem(SYNC_STATE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== "object") return {}
+    return parsed as SyncStateStore
+  } catch {
+    return {}
+  }
+}
+
+const saveSyncStateStore = (store: SyncStateStore) => {
+  if (typeof localStorage === "undefined") return
+  localStorage.setItem(SYNC_STATE_KEY, JSON.stringify(store))
+}
+
+const loadUserSyncState = (userId: string): UserSyncState | null => {
+  if (!userId) return null
+  const store = loadSyncStateStore()
+  const state = store[userId]
+  if (!state || typeof state !== "object") return null
+  const signature = typeof state.signature === "string" ? state.signature : ""
+  if (!signature) return null
+  return {
+    signature,
+    synced_at: normalizeTimestampValue(state.synced_at) || "",
+    uploaded_at: normalizeTimestampValue(state.uploaded_at) || "",
+    downloaded_at: normalizeTimestampValue(state.downloaded_at) || "",
+  }
+}
+
+const saveUserSyncState = (userId: string, state: UserSyncState) => {
+  if (!userId) return
+  const store = loadSyncStateStore()
+  store[userId] = state
+  saveSyncStateStore(store)
+}
+
+const loadRollbackSnapshot = (): RollbackSnapshot | null => {
+  if (typeof localStorage === "undefined") return null
+  try {
+    const raw = localStorage.getItem(ROLLBACK_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== "object") return null
+    const snapshot = parsed as Partial<RollbackSnapshot>
+    if (!snapshot.data || typeof snapshot.data !== "object") return null
+    const savedAt = normalizeTimestampValue(snapshot.saved_at) || ""
+    if (!savedAt) return null
+    return {
+      saved_at: savedAt,
+      reason: typeof snapshot.reason === "string" ? snapshot.reason : "",
+      data: normalizeImportedData(snapshot.data),
+    }
+  } catch {
+    return null
+  }
+}
+
+const saveRollbackSnapshot = (snapshot: RollbackSnapshot) => {
+  if (typeof localStorage === "undefined") return
+  localStorage.setItem(ROLLBACK_KEY, JSON.stringify(snapshot))
 }
 
 const loadAppData = () => {
@@ -816,6 +904,7 @@ const App = () => {
   const [syncLoading, setSyncLoading] = useState(false)
   const [autoSyncing, setAutoSyncing] = useState(false)
   const [autoSyncError, setAutoSyncError] = useState("")
+  const [rollbackSavedAt, setRollbackSavedAt] = useState("")
   const [appVersion, setAppVersion] = useState(window.soulwinning?.version ?? "0.0.0")
   const [updateStatus, setUpdateStatus] = useState("")
   const [updateReady, setUpdateReady] = useState(false)
@@ -1270,6 +1359,11 @@ const App = () => {
   }, [appDataSnapshot])
 
   useEffect(() => {
+    const rollback = loadRollbackSnapshot()
+    setRollbackSavedAt(rollback?.saved_at ?? "")
+  }, [])
+
+  useEffect(() => {
     if (!supabase) return
     let isMounted = true
     supabase.auth
@@ -1324,11 +1418,14 @@ const App = () => {
 
     if (cloudSyncBaselineUserIdRef.current !== authUserId) {
       cloudSyncBaselineUserIdRef.current = authUserId
-      lastCloudUploadSignatureRef.current = `${authUserId}:${JSON.stringify(appDataSnapshot)}`
       cloudSyncRetryQueuedRef.current = false
+      const syncState = loadUserSyncState(authUserId)
+      lastCloudUploadSignatureRef.current = syncState?.signature ?? ""
+      setSyncLastUploadedAt(syncState?.uploaded_at ?? "")
+      setSyncLastDownloadedAt(syncState?.downloaded_at ?? "")
       setAutoSyncError("")
     }
-  }, [authUserId, appDataSnapshot])
+  }, [authUserId])
 
   useEffect(() => {
     const isValidTheme = AVAILABLE_THEMES.some((theme) => theme.id === themeName)
@@ -2505,6 +2602,7 @@ const App = () => {
       : "status--success"
   const syncLastUploadedLabel = formatTimestampLabel(syncLastUploadedAt)
   const syncLastDownloadedLabel = formatTimestampLabel(syncLastDownloadedAt)
+  const rollbackSavedLabel = formatTimestampLabel(rollbackSavedAt)
 
   const settingsDetailLabel =
     settingsDetail === "sessions"
@@ -2629,6 +2727,63 @@ const App = () => {
     }
   }, [resetSessionDraft, resetStandaloneDraft])
 
+  const persistUserSyncState = useCallback(
+    ({
+      signature,
+      uploadedAt,
+      downloadedAt,
+    }: {
+      signature: string
+      uploadedAt: string
+      downloadedAt: string
+    }) => {
+      if (!authUserId) return
+      const syncedAt = new Date().toISOString()
+      saveUserSyncState(authUserId, {
+        signature,
+        synced_at: syncedAt,
+        uploaded_at: uploadedAt,
+        downloaded_at: downloadedAt,
+      })
+      lastCloudUploadSignatureRef.current = signature
+      setSyncLastUploadedAt(uploadedAt)
+      setSyncLastDownloadedAt(downloadedAt)
+    },
+    [authUserId],
+  )
+
+  const saveRollbackGuardSnapshot = useCallback(
+    (reason: string) => {
+      const savedAt = new Date().toISOString()
+      saveRollbackSnapshot({
+        saved_at: savedAt,
+        reason,
+        data: appDataSnapshot,
+      })
+      setRollbackSavedAt(savedAt)
+    },
+    [appDataSnapshot],
+  )
+
+  const handleRestoreRollbackSnapshot = () => {
+    clearMessages()
+    const snapshot = loadRollbackSnapshot()
+    if (!snapshot) {
+      setActionError("No rollback snapshot found.")
+      return
+    }
+    if (!window.confirm("Restore the previous local snapshot? This replaces your current local data.")) {
+      return
+    }
+    const normalized = normalizeImportedData(snapshot.data)
+    applyImportedData(normalized, "Rollback restored from local safety snapshot.")
+    if (authUserId) {
+      lastCloudUploadSignatureRef.current = ""
+      hasAutoPulledUserIdRef.current = authUserId
+    }
+    setAutoSyncError("")
+  }
+
   const uploadCloudSnapshot = useCallback(
     async ({
       force = false,
@@ -2666,7 +2821,7 @@ const App = () => {
       }
 
       const payload = appDataSnapshot
-      const signature = `${authUserId}:${JSON.stringify(payload)}`
+      const signature = buildCloudSignature(authUserId, payload)
       if (!force && signature === lastCloudUploadSignatureRef.current) {
         return true
       }
@@ -2679,6 +2834,50 @@ const App = () => {
       }
 
       try {
+        const { data: existingSnapshot, error: existingSnapshotError } = await supabase
+          .from(SUPABASE_SNAPSHOT_TABLE)
+          .select("payload")
+          .eq("user_id", authUserId)
+          .maybeSingle()
+        if (existingSnapshotError) throw existingSnapshotError
+
+        let remoteSignature = ""
+        if (
+          existingSnapshot &&
+          typeof existingSnapshot.payload === "object" &&
+          existingSnapshot.payload !== null
+        ) {
+          const normalizedRemote = normalizeImportedData(existingSnapshot.payload)
+          remoteSignature = buildCloudSignature(authUserId, normalizedRemote)
+        }
+
+        const knownSyncedSignature = lastCloudUploadSignatureRef.current
+        const remoteChangedSinceLastSync =
+          Boolean(remoteSignature) &&
+          Boolean(knownSyncedSignature) &&
+          remoteSignature !== knownSyncedSignature
+        const unknownSyncHistoryWithDifferentRemote =
+          !knownSyncedSignature && Boolean(remoteSignature) && remoteSignature !== signature
+
+        if (remoteChangedSinceLastSync || unknownSyncHistoryWithDifferentRemote) {
+          const conflictMessage =
+            "Cloud backup changed on another device. Download from cloud first, or use Sync now and confirm overwrite."
+          if (!force) {
+            if (showErrorMessage) {
+              setActionError(conflictMessage)
+            } else {
+              setAutoSyncError(conflictMessage)
+            }
+            return false
+          }
+          const confirmed = window.confirm(
+            "Cloud backup has changed on another device. Sync now will overwrite cloud data. Continue?",
+          )
+          if (!confirmed) {
+            return false
+          }
+        }
+
         const updatedAt = new Date().toISOString()
         const { error } = await supabase.from(SUPABASE_SNAPSHOT_TABLE).upsert(
           {
@@ -2689,8 +2888,11 @@ const App = () => {
           { onConflict: "user_id" },
         )
         if (error) throw error
-        lastCloudUploadSignatureRef.current = signature
-        setSyncLastUploadedAt(updatedAt)
+        persistUserSyncState({
+          signature,
+          uploadedAt: updatedAt,
+          downloadedAt: syncLastDownloadedAt,
+        })
         setAutoSyncError("")
         if (showSuccessMessage) {
           setActionMessage(successMessage)
@@ -2725,7 +2927,7 @@ const App = () => {
         }
       }
     },
-    [appDataSnapshot, authUserId],
+    [appDataSnapshot, authUserId, persistUserSyncState, syncLastDownloadedAt],
   )
 
   const downloadCloudSnapshot = useCallback(
@@ -2784,19 +2986,46 @@ const App = () => {
         }
 
         const normalized = normalizeImportedData(data.payload)
-        const remoteSignature = `${authUserId}:${JSON.stringify(normalized)}`
-        const localSignature = `${authUserId}:${JSON.stringify(appDataSnapshot)}`
+        const remoteSignature = buildCloudSignature(authUserId, normalized)
+        const localSignature = buildCloudSignature(authUserId, appDataSnapshot)
+        const knownSyncedSignature = lastCloudUploadSignatureRef.current
+        const localUnsyncedSinceLastSync =
+          Boolean(knownSyncedSignature) && localSignature !== knownSyncedSignature
+        const localUnsyncedWithoutHistory =
+          !knownSyncedSignature && hasMeaningfulData(appDataSnapshot)
+        const wouldOverwriteLocal = remoteSignature !== localSignature
         const downloadedAt = normalizeTimestampValue(data.updated_at) || new Date().toISOString()
-        setSyncLastDownloadedAt(downloadedAt)
         setAutoSyncError("")
 
-        if (!force && remoteSignature === localSignature) {
-          lastCloudUploadSignatureRef.current = remoteSignature
+        if (!force && wouldOverwriteLocal && (localUnsyncedSinceLastSync || localUnsyncedWithoutHistory)) {
+          const conflictMessage =
+            "Conflict detected: local unsynced data was kept. Use Sync now to upload local changes, or Download from cloud to overwrite local."
+          if (showErrorMessage) {
+            setActionError(conflictMessage)
+          } else {
+            setAutoSyncError(conflictMessage)
+          }
+          return false
+        }
+
+        if (!force && !wouldOverwriteLocal) {
+          persistUserSyncState({
+            signature: remoteSignature,
+            uploadedAt: syncLastUploadedAt,
+            downloadedAt,
+          })
           return true
         }
 
-        lastCloudUploadSignatureRef.current = remoteSignature
+        if (wouldOverwriteLocal) {
+          saveRollbackGuardSnapshot("before-cloud-download")
+        }
         cloudSyncRetryQueuedRef.current = false
+        persistUserSyncState({
+          signature: remoteSignature,
+          uploadedAt: syncLastUploadedAt,
+          downloadedAt,
+        })
         applyImportedData(normalized, showSuccessMessage ? successMessage : undefined)
         return true
       } catch (error) {
@@ -2816,7 +3045,14 @@ const App = () => {
         }
       }
     },
-    [appDataSnapshot, authUserId, applyImportedData],
+    [
+      appDataSnapshot,
+      authUserId,
+      applyImportedData,
+      persistUserSyncState,
+      saveRollbackGuardSnapshot,
+      syncLastUploadedAt,
+    ],
   )
 
   useEffect(() => {
@@ -7838,6 +8074,9 @@ const App = () => {
                         <div className="note-text">
                           Last download: {syncLastDownloadedLabel || "Not downloaded yet."}
                         </div>
+                        <div className="note-text">
+                          Rollback snapshot: {rollbackSavedLabel || "Not available yet."}
+                        </div>
                         {autoSyncError ? (
                           <div className="status status--error status--inline">
                             Auto-save error: {autoSyncError}
@@ -7845,7 +8084,8 @@ const App = () => {
                         ) : null}
                         <div className="note">
                           Auto-save writes local changes to cloud. Use Download to pull your latest cloud
-                          backup onto this device.
+                          backup onto this device. Conflict guard prevents auto-overwrite of unsynced local
+                          data.
                         </div>
                         <div className="form-actions">
                           <button
@@ -7867,6 +8107,14 @@ const App = () => {
                             disabled={syncLoading || authLoading || loading || autoSyncing}
                           >
                             Download from cloud
+                          </button>
+                          <button
+                            className="btn btn--ghost"
+                            type="button"
+                            onClick={handleRestoreRollbackSnapshot}
+                            disabled={syncLoading || authLoading || loading || autoSyncing || !rollbackSavedAt}
+                          >
+                            Restore rollback
                           </button>
                           <button
                             className="btn btn--ghost"

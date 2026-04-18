@@ -72,3 +72,5 @@ VITE_SUPABASE_ANON_KEY=YOUR_ANON_PUBLIC_KEY
 3. While signed in, data auto-saves to cloud after changes.
 4. On another device, sign in to auto-pull the latest cloud backup.
 5. Use **Download from cloud** anytime to force a manual refresh from cloud.
+6. Conflict guard prevents automatic cloud pulls from overwriting unsynced local changes.
+7. If a cloud download replaces local data, use **Restore rollback** to recover the previous local snapshot.
