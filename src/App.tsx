@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react"
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import "./App.css"
 import { THEME_DEFS } from "./themes"
 import { isSupabaseConfigured, supabase } from "./lib/supabaseClient"
@@ -625,6 +625,7 @@ const STORAGE_KEY = "soulwinning-tracker-data-v1"
 const THEME_MODE_KEY = "soulwinning_theme"
 const THEME_NAME_KEY = "soulwinning_theme_name"
 const SUPABASE_SNAPSHOT_TABLE = "user_snapshots"
+const AUTO_SYNC_DEBOUNCE_MS = 1500
 const EXCLUDED_THEME_IDS = new Set([
   "dark-souls-2",
   "eva-00",
@@ -813,6 +814,8 @@ const App = () => {
   const [syncLastUploadedAt, setSyncLastUploadedAt] = useState("")
   const [syncLastDownloadedAt, setSyncLastDownloadedAt] = useState("")
   const [syncLoading, setSyncLoading] = useState(false)
+  const [autoSyncing, setAutoSyncing] = useState(false)
+  const [autoSyncError, setAutoSyncError] = useState("")
   const [appVersion, setAppVersion] = useState(window.soulwinning?.version ?? "0.0.0")
   const [updateStatus, setUpdateStatus] = useState("")
   const [updateReady, setUpdateReady] = useState(false)
@@ -824,6 +827,10 @@ const App = () => {
     summary?: string
   } | null>(null)
   const [statsDetail, setStatsDetail] = useState<StatsDetail | null>(null)
+  const cloudSyncInFlightRef = useRef(false)
+  const cloudSyncRetryQueuedRef = useRef(false)
+  const lastCloudUploadSignatureRef = useRef("")
+  const cloudSyncBaselineUserIdRef = useRef("")
 
   const defaultDatasetId = useMemo(() => datasets[0]?.id ?? "", [datasets])
 
@@ -1287,6 +1294,12 @@ const App = () => {
       if (!session) {
         setSyncLastUploadedAt("")
         setSyncLastDownloadedAt("")
+        setAutoSyncError("")
+        setAutoSyncing(false)
+        cloudSyncInFlightRef.current = false
+        cloudSyncRetryQueuedRef.current = false
+        lastCloudUploadSignatureRef.current = ""
+        cloudSyncBaselineUserIdRef.current = ""
       }
     })
 
@@ -1295,6 +1308,24 @@ const App = () => {
       subscription.unsubscribe()
     }
   }, [])
+
+  useEffect(() => {
+    if (!authUserId) {
+      cloudSyncBaselineUserIdRef.current = ""
+      cloudSyncRetryQueuedRef.current = false
+      lastCloudUploadSignatureRef.current = ""
+      setAutoSyncError("")
+      setAutoSyncing(false)
+      return
+    }
+
+    if (cloudSyncBaselineUserIdRef.current !== authUserId) {
+      cloudSyncBaselineUserIdRef.current = authUserId
+      lastCloudUploadSignatureRef.current = `${authUserId}:${JSON.stringify(appDataSnapshot)}`
+      cloudSyncRetryQueuedRef.current = false
+      setAutoSyncError("")
+    }
+  }, [authUserId, appDataSnapshot])
 
   useEffect(() => {
     const isValidTheme = AVAILABLE_THEMES.some((theme) => theme.id === themeName)
@@ -2593,6 +2624,120 @@ const App = () => {
     setActionMessage(message)
   }
 
+  const uploadCloudSnapshot = useCallback(
+    async ({
+      force = false,
+      showBusyState = false,
+      showSuccessMessage = false,
+      showErrorMessage = true,
+      successMessage = "Cloud backup uploaded.",
+    }: {
+      force?: boolean
+      showBusyState?: boolean
+      showSuccessMessage?: boolean
+      showErrorMessage?: boolean
+      successMessage?: string
+    } = {}) => {
+      if (!supabase || !isSupabaseConfigured) {
+        if (showErrorMessage) {
+          setActionError("Supabase is not configured for this deployment.")
+        }
+        return false
+      }
+      if (!authUserId) {
+        if (showErrorMessage) {
+          setActionError("Sign in first to upload a cloud backup.")
+        }
+        return false
+      }
+
+      if (cloudSyncInFlightRef.current) {
+        if (!showBusyState && !showErrorMessage) {
+          cloudSyncRetryQueuedRef.current = true
+        } else if (showErrorMessage) {
+          setActionError("Cloud sync already in progress. Please wait a moment and try again.")
+        }
+        return false
+      }
+
+      const payload = appDataSnapshot
+      const signature = `${authUserId}:${JSON.stringify(payload)}`
+      if (!force && signature === lastCloudUploadSignatureRef.current) {
+        return true
+      }
+
+      cloudSyncInFlightRef.current = true
+      if (showBusyState) {
+        setSyncLoading(true)
+      } else {
+        setAutoSyncing(true)
+      }
+
+      try {
+        const updatedAt = new Date().toISOString()
+        const { error } = await supabase.from(SUPABASE_SNAPSHOT_TABLE).upsert(
+          {
+            user_id: authUserId,
+            payload,
+            updated_at: updatedAt,
+          },
+          { onConflict: "user_id" },
+        )
+        if (error) throw error
+        lastCloudUploadSignatureRef.current = signature
+        setSyncLastUploadedAt(updatedAt)
+        setAutoSyncError("")
+        if (showSuccessMessage) {
+          setActionMessage(successMessage)
+        }
+        return true
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Cloud upload failed."
+        if (showErrorMessage) {
+          setActionError(message)
+        } else {
+          setAutoSyncError(message)
+        }
+        return false
+      } finally {
+        cloudSyncInFlightRef.current = false
+        if (showBusyState) {
+          setSyncLoading(false)
+        } else {
+          setAutoSyncing(false)
+        }
+
+        if (cloudSyncRetryQueuedRef.current) {
+          cloudSyncRetryQueuedRef.current = false
+          window.setTimeout(() => {
+            void uploadCloudSnapshot({
+              force: false,
+              showBusyState: false,
+              showSuccessMessage: false,
+              showErrorMessage: false,
+            })
+          }, 0)
+        }
+      }
+    },
+    [appDataSnapshot, authUserId],
+  )
+
+  useEffect(() => {
+    if (!supabase || !isSupabaseConfigured) return
+    if (!authUserId) return
+    if (authLoading || syncLoading || loading) return
+    const timer = window.setTimeout(() => {
+      void uploadCloudSnapshot({
+        force: false,
+        showBusyState: false,
+        showSuccessMessage: false,
+        showErrorMessage: false,
+      })
+    }, AUTO_SYNC_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [appDataSnapshot, authLoading, authUserId, loading, syncLoading, uploadCloudSnapshot])
+
   const handleAuthSubmit = async (event: React.FormEvent) => {
     event.preventDefault()
     clearMessages()
@@ -2636,6 +2781,10 @@ const App = () => {
       setActionError("Supabase is not configured for this deployment.")
       return
     }
+    if (cloudSyncInFlightRef.current) {
+      setActionError("Cloud sync already in progress. Please wait a moment and try again.")
+      return
+    }
     setAuthLoading(true)
     try {
       const { error } = await supabase.auth.signOut()
@@ -2652,33 +2801,13 @@ const App = () => {
   const handleCloudSyncUpload = async () => {
     clearMessages()
     if (syncLoading || authLoading) return
-    if (!supabase || !isSupabaseConfigured) {
-      setActionError("Supabase is not configured for this deployment.")
-      return
-    }
-    if (!authUserId) {
-      setActionError("Sign in first to upload a cloud backup.")
-      return
-    }
-    setSyncLoading(true)
-    try {
-      const updatedAt = new Date().toISOString()
-      const { error } = await supabase.from(SUPABASE_SNAPSHOT_TABLE).upsert(
-        {
-          user_id: authUserId,
-          payload: appDataSnapshot,
-          updated_at: updatedAt,
-        },
-        { onConflict: "user_id" },
-      )
-      if (error) throw error
-      setSyncLastUploadedAt(updatedAt)
-      setActionMessage("Cloud backup uploaded.")
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : "Cloud upload failed.")
-    } finally {
-      setSyncLoading(false)
-    }
+    await uploadCloudSnapshot({
+      force: true,
+      showBusyState: true,
+      showSuccessMessage: true,
+      showErrorMessage: true,
+      successMessage: "Cloud backup uploaded.",
+    })
   }
 
   const handleCloudSyncDownload = async () => {
@@ -2690,6 +2819,10 @@ const App = () => {
     }
     if (!authUserId) {
       setActionError("Sign in first to download a cloud backup.")
+      return
+    }
+    if (cloudSyncInFlightRef.current) {
+      setActionError("Cloud sync already in progress. Please wait a moment and try again.")
       return
     }
     if (!window.confirm("Download from cloud and replace your local data on this device?")) {
@@ -2708,8 +2841,11 @@ const App = () => {
         return
       }
       const normalized = normalizeImportedData(data.payload)
+      lastCloudUploadSignatureRef.current = `${authUserId}:${JSON.stringify(normalized)}`
+      cloudSyncRetryQueuedRef.current = false
       applyImportedData(normalized, "Cloud backup downloaded.")
       setSyncLastDownloadedAt(normalizeTimestampValue(data.updated_at) || new Date().toISOString())
+      setAutoSyncError("")
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Cloud download failed.")
     } finally {
@@ -7533,7 +7669,7 @@ const App = () => {
                   <section className="panel panel--soft settings-section">
                     <h3>Cloud sync</h3>
                     <div className="note">
-                      Sign in with email/password, then upload and download your backup across devices.
+                      Sign in with email/password and your data will auto-save to cloud while you use the app.
                     </div>
                     {!isSupabaseConfigured ? (
                       <div className="empty-state">
@@ -7607,14 +7743,22 @@ const App = () => {
                           Signed in as <strong>{authUserEmail || "Unknown user"}</strong>.
                         </div>
                         <div className="note-text">
+                          Auto-save: <strong>{autoSyncing ? "Saving..." : "On"}</strong>
+                        </div>
+                        <div className="note-text">
                           Last upload: {syncLastUploadedLabel || "Not uploaded yet."}
                         </div>
                         <div className="note-text">
                           Last download: {syncLastDownloadedLabel || "Not downloaded yet."}
                         </div>
+                        {autoSyncError ? (
+                          <div className="status status--error status--inline">
+                            Auto-save error: {autoSyncError}
+                          </div>
+                        ) : null}
                         <div className="note">
-                          Upload writes your current local data to cloud storage. Download replaces this
-                          device&apos;s local data with your cloud backup.
+                          Auto-save writes local changes to cloud. Use Download to pull your latest cloud
+                          backup onto this device.
                         </div>
                         <div className="form-actions">
                           <button
@@ -7623,9 +7767,9 @@ const App = () => {
                             onClick={() => {
                               void handleCloudSyncUpload()
                             }}
-                            disabled={syncLoading || authLoading || loading}
+                            disabled={syncLoading || authLoading || loading || autoSyncing}
                           >
-                            {syncLoading ? "Working..." : "Upload to cloud"}
+                            {syncLoading ? "Working..." : "Sync now"}
                           </button>
                           <button
                             className="btn btn--soft"
@@ -7633,7 +7777,7 @@ const App = () => {
                             onClick={() => {
                               void handleCloudSyncDownload()
                             }}
-                            disabled={syncLoading || authLoading || loading}
+                            disabled={syncLoading || authLoading || loading || autoSyncing}
                           >
                             Download from cloud
                           </button>
@@ -7643,7 +7787,7 @@ const App = () => {
                             onClick={() => {
                               void handleSignOut()
                             }}
-                            disabled={syncLoading || authLoading || loading}
+                            disabled={syncLoading || authLoading || loading || autoSyncing}
                           >
                             Sign out
                           </button>

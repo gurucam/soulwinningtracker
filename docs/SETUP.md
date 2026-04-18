@@ -13,7 +13,7 @@
 2. Find the installer in the `release` folder.
 
 ## Data storage & transfer
-- Data is stored locally inside the app (no accounts or servers).
+- Data is stored locally by default.
 - Use **Stats -> Backup & transfer** to export/import a JSON backup.
 - Use **Stats -> CSV export** for spreadsheets.
 
