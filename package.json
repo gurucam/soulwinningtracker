@@ -1,7 +1,7 @@
 {
   "name": "soulwinning-tracker",
   "private": true,
-  "version": "0.0.1",
+  "version": "1.0.0",
   "description": "Soulwinning tracker with sessions, people, tags, and stats.",
   "type": "module",
   "productName": "Soulwinning Tracker",
@@ -15,6 +15,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.103.3",
     "electron-updater": "^6.6.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
@@ -40,11 +41,12 @@
   "build": {
     "appId": "com.soulwinning.tracker",
     "productName": "Soulwinning Tracker",
+    "artifactName": "Soulwinning-Tracker-Setup-${version}.exe",
     "publish": [
       {
         "provider": "github",
-        "owner": "YOUR_GITHUB_USERNAME",
-        "repo": "YOUR_REPO_NAME"
+        "owner": "gurucam",
+        "repo": "SoulwinningTracker"
       }
     ],
     "files": [
@@ -52,6 +54,9 @@
       "electron/**/*",
       "package.json",
       "swt.png"
+    ],
+    "asarUnpack": [
+      "electron/preload.cjs"
     ],
     "icon": "swt.png",
     "directories": {

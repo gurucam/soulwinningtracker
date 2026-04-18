@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react"
 import "./App.css"
 import { THEME_DEFS } from "./themes"
+import { isSupabaseConfigured, supabase } from "./lib/supabaseClient"
 
 type SessionType = "session" | "standalone"
 type SalvationRole = "presenter" | "partner"
@@ -104,6 +105,8 @@ type GoalDefinition = {
   created_at: string
 }
 
+type AuthViewMode = "signin" | "signup"
+
 type StatsDetail =
   | {
       kind: "event"
@@ -118,12 +121,14 @@ type StatsDetail =
 type UpdateStatusPayload = {
   message?: string
   ready?: boolean
+  progress?: number
 }
 
 type SoulwinningBridge = {
   version?: string
   checkForUpdates?: () => Promise<{ ok: boolean; error?: string } | void>
   installUpdate?: () => void
+  getVersion?: () => Promise<string>
   openExternal?: (url: string) => void
   getUserDataPath?: () => Promise<string>
   onUpdateStatus?: (handler: (payload: UpdateStatusPayload) => void) => (() => void) | void
@@ -151,7 +156,7 @@ const TAG_SEARCH_LIMIT = 12
 const TAG_DETAIL_PREVIEW_LIMIT = 3
 const STATS_SEARCH_LIMIT = 6
 const DEFAULT_GOALS: GoalDefinition[] = []
-const FEEDBACK_URL = "https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME/issues/new"
+const FEEDBACK_URL = "https://github.com/gurucam/SoulwinningTracker/issues/new"
 const SUPPORT_URL = "https://ko-fi.com/rrcam"
 const DEFAULT_STATS_VIEWS: StatsView[] = [
   {
@@ -209,6 +214,13 @@ const timeFormatter = new Intl.DateTimeFormat("en-US", {
 const monthFormatter = new Intl.DateTimeFormat("en-US", {
   month: "short",
   year: "numeric",
+})
+const dateTimeFormatter = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
 })
 
 const normalizeTimeValue = (value: unknown) => {
@@ -612,6 +624,7 @@ type AppData = {
 const STORAGE_KEY = "soulwinning-tracker-data-v1"
 const THEME_MODE_KEY = "soulwinning_theme"
 const THEME_NAME_KEY = "soulwinning_theme_name"
+const SUPABASE_SNAPSHOT_TABLE = "user_snapshots"
 const EXCLUDED_THEME_IDS = new Set([
   "dark-souls-2",
   "eva-00",
@@ -657,6 +670,22 @@ const buildEmptyData = (): AppData => ({
   goals: [...DEFAULT_GOALS],
   statsViews: [...DEFAULT_STATS_VIEWS],
 })
+
+const normalizeTimestampValue = (value: unknown) => {
+  if (typeof value !== "string") return ""
+  const trimmed = value.trim()
+  if (!trimmed) return ""
+  const parsed = Date.parse(trimmed)
+  if (!Number.isFinite(parsed)) return ""
+  return new Date(parsed).toISOString()
+}
+
+const formatTimestampLabel = (value: string) => {
+  if (!value) return ""
+  const parsed = Date.parse(value)
+  if (!Number.isFinite(parsed)) return ""
+  return dateTimeFormatter.format(new Date(parsed))
+}
 
 const loadAppData = () => {
   if (typeof localStorage === "undefined") return buildEmptyData()
@@ -775,9 +804,19 @@ const App = () => {
   const [loading, setLoading] = useState(false)
   const [actionMessage, setActionMessage] = useState("")
   const [actionError, setActionError] = useState("")
-  const appVersion = window.soulwinning?.version ?? "0.0.0"
+  const [authMode, setAuthMode] = useState<AuthViewMode>("signin")
+  const [authEmail, setAuthEmail] = useState("")
+  const [authPassword, setAuthPassword] = useState("")
+  const [authUserId, setAuthUserId] = useState("")
+  const [authUserEmail, setAuthUserEmail] = useState("")
+  const [authLoading, setAuthLoading] = useState(false)
+  const [syncLastUploadedAt, setSyncLastUploadedAt] = useState("")
+  const [syncLastDownloadedAt, setSyncLastDownloadedAt] = useState("")
+  const [syncLoading, setSyncLoading] = useState(false)
+  const [appVersion, setAppVersion] = useState(window.soulwinning?.version ?? "0.0.0")
   const [updateStatus, setUpdateStatus] = useState("")
   const [updateReady, setUpdateReady] = useState(false)
+  const [updateProgress, setUpdateProgress] = useState<number | null>(null)
   const [userDataPath, setUserDataPath] = useState("")
   const [backupCheckResult, setBackupCheckResult] = useState<{
     ok: boolean
@@ -903,6 +942,7 @@ const App = () => {
     | "howto"
     | "exports"
     | "backup"
+    | "sync"
     | "update"
     | "danger"
   >("overview")
@@ -1066,6 +1106,7 @@ const App = () => {
 
   const handleCheckForUpdates = () => {
     setUpdateReady(false)
+    setUpdateProgress(null)
     setUpdateStatus("Checking for updates...")
     const api = window.soulwinning
     if (!api?.checkForUpdates) {
@@ -1203,9 +1244,57 @@ const App = () => {
     return newTag
   }
 
+  const appDataSnapshot = useMemo<AppData>(
+    () => ({
+      version: 1,
+      sessions,
+      people,
+      tags,
+      datasets,
+      goals,
+      statsViews,
+    }),
+    [sessions, people, tags, datasets, goals, statsViews],
+  )
+
   useEffect(() => {
-    saveAppData({ version: 1, sessions, people, tags, datasets, goals, statsViews })
-  }, [sessions, people, tags, datasets, goals, statsViews])
+    saveAppData(appDataSnapshot)
+  }, [appDataSnapshot])
+
+  useEffect(() => {
+    if (!supabase) return
+    let isMounted = true
+    supabase.auth
+      .getSession()
+      .then(({ data }) => {
+        if (!isMounted) return
+        const session = data.session
+        setAuthUserId(session?.user.id ?? "")
+        setAuthUserEmail(session?.user.email ?? "")
+      })
+      .catch(() => {
+        if (!isMounted) return
+        setAuthUserId("")
+        setAuthUserEmail("")
+      })
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!isMounted) return
+      setAuthUserId(session?.user.id ?? "")
+      setAuthUserEmail(session?.user.email ?? "")
+      if (!session) {
+        setSyncLastUploadedAt("")
+        setSyncLastDownloadedAt("")
+      }
+    })
+
+    return () => {
+      isMounted = false
+      subscription.unsubscribe()
+    }
+  }, [])
 
   useEffect(() => {
     const isValidTheme = AVAILABLE_THEMES.some((theme) => theme.id === themeName)
@@ -1296,10 +1385,31 @@ const App = () => {
 
   useEffect(() => {
     const api = window.soulwinning
+    if (!api?.getVersion) return
+    api
+      .getVersion()
+      .then((version) => {
+        if (typeof version === "string" && version.trim()) {
+          setAppVersion(version)
+        }
+      })
+      .catch(() => {
+        // ignore
+      })
+  }, [])
+
+  useEffect(() => {
+    const api = window.soulwinning
     if (!api?.onUpdateStatus) return
     const unsubscribe = api.onUpdateStatus((payload) => {
       if (!payload) return
       if (payload.message) setUpdateStatus(payload.message)
+      if (typeof payload.progress === "number" && Number.isFinite(payload.progress)) {
+        const clamped = Math.min(100, Math.max(0, payload.progress))
+        setUpdateProgress(clamped)
+      } else if (!payload.ready) {
+        setUpdateProgress(null)
+      }
       setUpdateReady(Boolean(payload.ready))
     })
     return () => {
@@ -2359,7 +2469,8 @@ const App = () => {
       updateStatus.toLowerCase().includes("failed"))
       ? "status--error"
       : "status--success"
-  const updateAvailable = Boolean(window.soulwinning?.checkForUpdates)
+  const syncLastUploadedLabel = formatTimestampLabel(syncLastUploadedAt)
+  const syncLastDownloadedLabel = formatTimestampLabel(syncLastDownloadedAt)
 
   const settingsDetailLabel =
     settingsDetail === "sessions"
@@ -2438,6 +2549,174 @@ const App = () => {
     fileInputRef.current?.click()
   }
 
+  const applyImportedData = (normalized: AppData, message: string) => {
+    setSessions(normalized.sessions)
+    setPeople(normalized.people)
+    setTags([...normalized.tags].sort((a, b) => a.name.localeCompare(b.name)))
+    setDatasets(normalized.datasets)
+    setGoals(normalized.goals)
+    setStatsViews(normalized.statsViews)
+    setActiveStatsViewId(normalized.statsViews[0]?.id ?? "")
+    setSelectedTagIds([])
+    setSelectedDatasetIds([])
+    setLogDatasetIds([])
+    setLogQuery("")
+    setStatsQuery("")
+    setStatsViewName("")
+    setStatsViewSections([])
+    setStatsBuilderOpen(false)
+    setEditingStatsViewId(null)
+    resetSessionDraft()
+    resetStandaloneDraft()
+    setEditingLogSessionId(null)
+    setEditEventName("")
+    setEditEventDate("")
+    setEditEventDatasetId("")
+    setEditEventSavedCount("")
+    setEditEventDoors("")
+    setEditEventStartTime("")
+    setEditEventEndTime("")
+    setEditEventNotes("")
+    setEditEventTagIds([])
+    setEditEventTagQuery("")
+    setEditingLogPersonId(null)
+    setLogPersonName("")
+    setLogPersonTags([])
+    setLogPersonNotes("")
+    setLogPersonTagQuery("")
+    setLogPersonTimeSpent("")
+    setLogAddSessionId(null)
+    setLogAddPersonName("")
+    setLogAddPersonTags([])
+    setLogAddPersonNotes("")
+    setLogAddPersonTagQuery("")
+    setActionMessage(message)
+  }
+
+  const handleAuthSubmit = async (event: React.FormEvent) => {
+    event.preventDefault()
+    clearMessages()
+    if (!supabase || !isSupabaseConfigured) {
+      setActionError("Supabase is not configured for this deployment.")
+      return
+    }
+    const email = authEmail.trim().toLowerCase()
+    const password = authPassword
+    if (!email || !password) {
+      setActionError("Email and password are required.")
+      return
+    }
+    setAuthLoading(true)
+    try {
+      if (authMode === "signin") {
+        const { error } = await supabase.auth.signInWithPassword({ email, password })
+        if (error) throw error
+        setActionMessage("Signed in.")
+      } else {
+        const { data, error } = await supabase.auth.signUp({ email, password })
+        if (error) throw error
+        if (data.session) {
+          setActionMessage("Account created and signed in.")
+        } else {
+          setActionMessage("Account created. Check your email to confirm, then sign in.")
+        }
+        setAuthMode("signin")
+      }
+      setAuthPassword("")
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Authentication failed.")
+    } finally {
+      setAuthLoading(false)
+    }
+  }
+
+  const handleSignOut = async () => {
+    clearMessages()
+    if (!supabase || !isSupabaseConfigured) {
+      setActionError("Supabase is not configured for this deployment.")
+      return
+    }
+    setAuthLoading(true)
+    try {
+      const { error } = await supabase.auth.signOut()
+      if (error) throw error
+      setAuthPassword("")
+      setActionMessage("Signed out.")
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Sign-out failed.")
+    } finally {
+      setAuthLoading(false)
+    }
+  }
+
+  const handleCloudSyncUpload = async () => {
+    clearMessages()
+    if (syncLoading || authLoading) return
+    if (!supabase || !isSupabaseConfigured) {
+      setActionError("Supabase is not configured for this deployment.")
+      return
+    }
+    if (!authUserId) {
+      setActionError("Sign in first to upload a cloud backup.")
+      return
+    }
+    setSyncLoading(true)
+    try {
+      const updatedAt = new Date().toISOString()
+      const { error } = await supabase.from(SUPABASE_SNAPSHOT_TABLE).upsert(
+        {
+          user_id: authUserId,
+          payload: appDataSnapshot,
+          updated_at: updatedAt,
+        },
+        { onConflict: "user_id" },
+      )
+      if (error) throw error
+      setSyncLastUploadedAt(updatedAt)
+      setActionMessage("Cloud backup uploaded.")
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Cloud upload failed.")
+    } finally {
+      setSyncLoading(false)
+    }
+  }
+
+  const handleCloudSyncDownload = async () => {
+    clearMessages()
+    if (syncLoading || authLoading) return
+    if (!supabase || !isSupabaseConfigured) {
+      setActionError("Supabase is not configured for this deployment.")
+      return
+    }
+    if (!authUserId) {
+      setActionError("Sign in first to download a cloud backup.")
+      return
+    }
+    if (!window.confirm("Download from cloud and replace your local data on this device?")) {
+      return
+    }
+    setSyncLoading(true)
+    try {
+      const { data, error } = await supabase
+        .from(SUPABASE_SNAPSHOT_TABLE)
+        .select("payload, updated_at")
+        .eq("user_id", authUserId)
+        .maybeSingle()
+      if (error) throw error
+      if (!data || typeof data.payload !== "object" || data.payload === null) {
+        setActionError("No cloud backup found for this account.")
+        return
+      }
+      const normalized = normalizeImportedData(data.payload)
+      applyImportedData(normalized, "Cloud backup downloaded.")
+      setSyncLastDownloadedAt(normalizeTimestampValue(data.updated_at) || new Date().toISOString())
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Cloud download failed.")
+    } finally {
+      setSyncLoading(false)
+    }
+  }
+
   const handleImportJson = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const input = event.target
     const file = input.files?.[0]
@@ -2455,47 +2734,7 @@ const App = () => {
       if (!window.confirm("Importing will replace your current data. Continue?")) {
         return
       }
-      setSessions(normalized.sessions)
-      setPeople(normalized.people)
-      setTags([...normalized.tags].sort((a, b) => a.name.localeCompare(b.name)))
-      setDatasets(normalized.datasets)
-      setGoals(normalized.goals)
-      setStatsViews(normalized.statsViews)
-      setActiveStatsViewId(normalized.statsViews[0]?.id ?? "")
-      setSelectedTagIds([])
-      setSelectedDatasetIds([])
-      setLogDatasetIds([])
-      setLogQuery("")
-      setStatsQuery("")
-      setStatsViewName("")
-      setStatsViewSections([])
-      setStatsBuilderOpen(false)
-      setEditingStatsViewId(null)
-      resetSessionDraft()
-      resetStandaloneDraft()
-      setEditingLogSessionId(null)
-      setEditEventName("")
-      setEditEventDate("")
-      setEditEventDatasetId("")
-      setEditEventSavedCount("")
-      setEditEventDoors("")
-      setEditEventStartTime("")
-      setEditEventEndTime("")
-      setEditEventNotes("")
-      setEditEventTagIds([])
-      setEditEventTagQuery("")
-    setEditingLogPersonId(null)
-    setLogPersonName("")
-    setLogPersonTags([])
-    setLogPersonNotes("")
-    setLogPersonTagQuery("")
-    setLogPersonTimeSpent("")
-    setLogAddSessionId(null)
-    setLogAddPersonName("")
-    setLogAddPersonTags([])
-    setLogAddPersonNotes("")
-    setLogAddPersonTagQuery("")
-    setActionMessage("Data imported.")
+      applyImportedData(normalized, "Data imported.")
     } catch {
       setActionError("Could not import that file.")
     } finally {
@@ -6613,6 +6852,14 @@ const App = () => {
                     <button
                       className="settings-menu-item"
                       type="button"
+                      onClick={() => setSettingsSection("sync")}
+                    >
+                      <span className="settings-menu-title">Cloud sync</span>
+                      <span className="settings-menu-text">Save and restore data across devices.</span>
+                    </button>
+                    <button
+                      className="settings-menu-item"
+                      type="button"
                       onClick={() => setSettingsSection("howto")}
                     >
                       <span className="settings-menu-title">How To</span>
@@ -7268,6 +7515,130 @@ const App = () => {
                   </section>
                 ) : null}
 
+                {settingsSection === "sync" ? (
+                  <section className="panel panel--soft settings-section">
+                    <h3>Cloud sync</h3>
+                    <div className="note">
+                      Sign in with email/password, then upload and download your backup across devices.
+                    </div>
+                    {!isSupabaseConfigured ? (
+                      <div className="empty-state">
+                        Supabase is not configured. Add `VITE_SUPABASE_URL` and
+                        `VITE_SUPABASE_ANON_KEY` to this deployment&apos;s environment variables.
+                      </div>
+                    ) : !authUserId ? (
+                      <form className="form-grid auth-card" onSubmit={handleAuthSubmit}>
+                        <div className="auth-toggle">
+                          <button
+                            className={`btn btn--compact ${authMode === "signin" ? "btn--primary" : "btn--ghost"}`}
+                            type="button"
+                            onClick={() => setAuthMode("signin")}
+                            disabled={authLoading}
+                          >
+                            Sign in
+                          </button>
+                          <button
+                            className={`btn btn--compact ${authMode === "signup" ? "btn--primary" : "btn--ghost"}`}
+                            type="button"
+                            onClick={() => setAuthMode("signup")}
+                            disabled={authLoading}
+                          >
+                            Create account
+                          </button>
+                        </div>
+                        <label>
+                          Email
+                          <input
+                            type="email"
+                            value={authEmail}
+                            onChange={(event) => setAuthEmail(event.target.value)}
+                            placeholder="you@example.com"
+                            autoComplete="email"
+                            required
+                          />
+                        </label>
+                        <label>
+                          Password
+                          <input
+                            type="password"
+                            value={authPassword}
+                            onChange={(event) => setAuthPassword(event.target.value)}
+                            placeholder="Enter password"
+                            autoComplete={authMode === "signin" ? "current-password" : "new-password"}
+                            required
+                          />
+                        </label>
+                        <div className="note-text">
+                          {authMode === "signup"
+                            ? "Account sign-up may require email confirmation depending on your Supabase auth settings."
+                            : "Sign in to upload or restore your cloud backup."}
+                        </div>
+                        <div className="form-actions">
+                          <button
+                            className="btn btn--primary"
+                            type="submit"
+                            disabled={authLoading || syncLoading || loading}
+                          >
+                            {authLoading
+                              ? "Working..."
+                              : authMode === "signin"
+                                ? "Sign in"
+                                : "Create account"}
+                          </button>
+                        </div>
+                      </form>
+                    ) : (
+                      <div className="form-grid">
+                        <div className="note-text">
+                          Signed in as <strong>{authUserEmail || "Unknown user"}</strong>.
+                        </div>
+                        <div className="note-text">
+                          Last upload: {syncLastUploadedLabel || "Not uploaded yet."}
+                        </div>
+                        <div className="note-text">
+                          Last download: {syncLastDownloadedLabel || "Not downloaded yet."}
+                        </div>
+                        <div className="note">
+                          Upload writes your current local data to cloud storage. Download replaces this
+                          device&apos;s local data with your cloud backup.
+                        </div>
+                        <div className="form-actions">
+                          <button
+                            className="btn btn--primary"
+                            type="button"
+                            onClick={() => {
+                              void handleCloudSyncUpload()
+                            }}
+                            disabled={syncLoading || authLoading || loading}
+                          >
+                            {syncLoading ? "Working..." : "Upload to cloud"}
+                          </button>
+                          <button
+                            className="btn btn--soft"
+                            type="button"
+                            onClick={() => {
+                              void handleCloudSyncDownload()
+                            }}
+                            disabled={syncLoading || authLoading || loading}
+                          >
+                            Download from cloud
+                          </button>
+                          <button
+                            className="btn btn--ghost"
+                            type="button"
+                            onClick={() => {
+                              void handleSignOut()
+                            }}
+                            disabled={syncLoading || authLoading || loading}
+                          >
+                            Sign out
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </section>
+                ) : null}
+
                 {settingsSection === "feedback" ? (
                   <section className="panel panel--soft settings-section">
                     <h3>Submit Feedback</h3>
@@ -7296,12 +7667,24 @@ const App = () => {
                     {updateStatus ? (
                       <div className={`status status--inline ${updateStatusTone}`}>{updateStatus}</div>
                     ) : null}
+                    {typeof updateProgress === "number" ? (
+                      <div className="update-progress">
+                        <div className="update-progress__bar">
+                          <div
+                            className="update-progress__fill"
+                            style={{ width: `${updateProgress}%` }}
+                          />
+                        </div>
+                        <div className="update-progress__meta">
+                          {Number.isFinite(updateProgress) ? updateProgress.toFixed(0) : "0"}%
+                        </div>
+                      </div>
+                    ) : null}
                     <div className="form-actions">
                       <button
                         className="btn btn--primary"
                         type="button"
                         onClick={handleCheckForUpdates}
-                        disabled={!updateAvailable}
                       >
                         Check for updates
                       </button>
@@ -7311,8 +7694,8 @@ const App = () => {
                         </button>
                       ) : null}
                     </div>
-                    {!updateAvailable ? (
-                      <div className="note">Updates are available in the desktop app.</div>
+                    {updateReady ? (
+                      <div className="note">Update downloaded. Click "Restart to update".</div>
                     ) : null}
                   </section>
                 ) : null}

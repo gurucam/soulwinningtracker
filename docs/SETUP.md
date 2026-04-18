@@ -16,3 +16,7 @@
 - Data is stored locally inside the app (no accounts or servers).
 - Use **Stats -> Backup & transfer** to export/import a JSON backup.
 - Use **Stats -> CSV export** for spreadsheets.
+
+## Optional cloud sync (Supabase)
+- If deployed to Cloudflare Pages, you can enable account-based cross-device sync.
+- Setup instructions: `docs/SUPABASE_SYNC.md`.
