@@ -831,6 +831,7 @@ const App = () => {
   const cloudSyncRetryQueuedRef = useRef(false)
   const lastCloudUploadSignatureRef = useRef("")
   const cloudSyncBaselineUserIdRef = useRef("")
+  const hasAutoPulledUserIdRef = useRef("")
 
   const defaultDatasetId = useMemo(() => datasets[0]?.id ?? "", [datasets])
 
@@ -971,7 +972,7 @@ const App = () => {
     setSessionSalvationsOpen(false)
   }
 
-  const resetSessionDraft = () => {
+  const resetSessionDraft = useCallback(() => {
     setDraftSessionName("")
     setDraftDate(toDateKey(new Date()))
     setDraftSavedCount("0")
@@ -992,9 +993,9 @@ const App = () => {
     setSessionPersonRole(DEFAULT_SALVATION_ROLE)
     setSessionPersonNotes("")
     setSessionTagQuery("")
-  }
+  }, [defaultDatasetId])
 
-  const resetStandaloneDraft = () => {
+  const resetStandaloneDraft = useCallback(() => {
     setStandaloneDate(toDateKey(new Date()))
     setStandaloneDatasetId(defaultDatasetId)
     setStandalonePersonName("")
@@ -1003,7 +1004,7 @@ const App = () => {
     setStandaloneTimeSpent("")
     setStandalonePersonNotes("")
     setStandaloneTagQuery("")
-  }
+  }, [defaultDatasetId])
 
   const resetGoalForm = () => {
     setGoalName("")
@@ -1300,6 +1301,7 @@ const App = () => {
         cloudSyncRetryQueuedRef.current = false
         lastCloudUploadSignatureRef.current = ""
         cloudSyncBaselineUserIdRef.current = ""
+        hasAutoPulledUserIdRef.current = ""
       }
     })
 
@@ -1314,6 +1316,7 @@ const App = () => {
       cloudSyncBaselineUserIdRef.current = ""
       cloudSyncRetryQueuedRef.current = false
       lastCloudUploadSignatureRef.current = ""
+      hasAutoPulledUserIdRef.current = ""
       setAutoSyncError("")
       setAutoSyncing(false)
       return
@@ -2580,7 +2583,7 @@ const App = () => {
     fileInputRef.current?.click()
   }
 
-  const applyImportedData = (normalized: AppData, message: string) => {
+  const applyImportedData = useCallback((normalized: AppData, message?: string) => {
     setSessions(normalized.sessions)
     setPeople(normalized.people)
     setTags([...normalized.tags].sort((a, b) => a.name.localeCompare(b.name)))
@@ -2621,8 +2624,10 @@ const App = () => {
     setLogAddPersonTags([])
     setLogAddPersonNotes("")
     setLogAddPersonTagQuery("")
-    setActionMessage(message)
-  }
+    if (message) {
+      setActionMessage(message)
+    }
+  }, [resetSessionDraft, resetStandaloneDraft])
 
   const uploadCloudSnapshot = useCallback(
     async ({
@@ -2723,6 +2728,112 @@ const App = () => {
     [appDataSnapshot, authUserId],
   )
 
+  const downloadCloudSnapshot = useCallback(
+    async ({
+      force = false,
+      showBusyState = false,
+      showSuccessMessage = true,
+      showErrorMessage = true,
+      successMessage = "Cloud backup downloaded.",
+    }: {
+      force?: boolean
+      showBusyState?: boolean
+      showSuccessMessage?: boolean
+      showErrorMessage?: boolean
+      successMessage?: string
+    } = {}) => {
+      if (!supabase || !isSupabaseConfigured) {
+        if (showErrorMessage) {
+          setActionError("Supabase is not configured for this deployment.")
+        }
+        return false
+      }
+      if (!authUserId) {
+        if (showErrorMessage) {
+          setActionError("Sign in first to download a cloud backup.")
+        }
+        return false
+      }
+
+      if (cloudSyncInFlightRef.current) {
+        if (showErrorMessage) {
+          setActionError("Cloud sync already in progress. Please wait a moment and try again.")
+        }
+        return false
+      }
+
+      cloudSyncInFlightRef.current = true
+      if (showBusyState) {
+        setSyncLoading(true)
+      } else {
+        setAutoSyncing(true)
+      }
+
+      try {
+        const { data, error } = await supabase
+          .from(SUPABASE_SNAPSHOT_TABLE)
+          .select("payload, updated_at")
+          .eq("user_id", authUserId)
+          .maybeSingle()
+        if (error) throw error
+        if (!data || typeof data.payload !== "object" || data.payload === null) {
+          if (showErrorMessage) {
+            setActionError("No cloud backup found for this account.")
+          }
+          return false
+        }
+
+        const normalized = normalizeImportedData(data.payload)
+        const remoteSignature = `${authUserId}:${JSON.stringify(normalized)}`
+        const localSignature = `${authUserId}:${JSON.stringify(appDataSnapshot)}`
+        const downloadedAt = normalizeTimestampValue(data.updated_at) || new Date().toISOString()
+        setSyncLastDownloadedAt(downloadedAt)
+        setAutoSyncError("")
+
+        if (!force && remoteSignature === localSignature) {
+          lastCloudUploadSignatureRef.current = remoteSignature
+          return true
+        }
+
+        lastCloudUploadSignatureRef.current = remoteSignature
+        cloudSyncRetryQueuedRef.current = false
+        applyImportedData(normalized, showSuccessMessage ? successMessage : undefined)
+        return true
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Cloud download failed."
+        if (showErrorMessage) {
+          setActionError(message)
+        } else {
+          setAutoSyncError(message)
+        }
+        return false
+      } finally {
+        cloudSyncInFlightRef.current = false
+        if (showBusyState) {
+          setSyncLoading(false)
+        } else {
+          setAutoSyncing(false)
+        }
+      }
+    },
+    [appDataSnapshot, authUserId, applyImportedData],
+  )
+
+  useEffect(() => {
+    if (!supabase || !isSupabaseConfigured) return
+    if (!authUserId) return
+    if (hasAutoPulledUserIdRef.current === authUserId) return
+
+    hasAutoPulledUserIdRef.current = authUserId
+    void downloadCloudSnapshot({
+      force: false,
+      showBusyState: false,
+      showSuccessMessage: true,
+      showErrorMessage: false,
+      successMessage: "Cloud data synced from your account.",
+    })
+  }, [authUserId, downloadCloudSnapshot])
+
   useEffect(() => {
     if (!supabase || !isSupabaseConfigured) return
     if (!authUserId) return
@@ -2813,44 +2924,20 @@ const App = () => {
   const handleCloudSyncDownload = async () => {
     clearMessages()
     if (syncLoading || authLoading) return
-    if (!supabase || !isSupabaseConfigured) {
-      setActionError("Supabase is not configured for this deployment.")
-      return
-    }
     if (!authUserId) {
       setActionError("Sign in first to download a cloud backup.")
-      return
-    }
-    if (cloudSyncInFlightRef.current) {
-      setActionError("Cloud sync already in progress. Please wait a moment and try again.")
       return
     }
     if (!window.confirm("Download from cloud and replace your local data on this device?")) {
       return
     }
-    setSyncLoading(true)
-    try {
-      const { data, error } = await supabase
-        .from(SUPABASE_SNAPSHOT_TABLE)
-        .select("payload, updated_at")
-        .eq("user_id", authUserId)
-        .maybeSingle()
-      if (error) throw error
-      if (!data || typeof data.payload !== "object" || data.payload === null) {
-        setActionError("No cloud backup found for this account.")
-        return
-      }
-      const normalized = normalizeImportedData(data.payload)
-      lastCloudUploadSignatureRef.current = `${authUserId}:${JSON.stringify(normalized)}`
-      cloudSyncRetryQueuedRef.current = false
-      applyImportedData(normalized, "Cloud backup downloaded.")
-      setSyncLastDownloadedAt(normalizeTimestampValue(data.updated_at) || new Date().toISOString())
-      setAutoSyncError("")
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : "Cloud download failed.")
-    } finally {
-      setSyncLoading(false)
-    }
+    await downloadCloudSnapshot({
+      force: true,
+      showBusyState: true,
+      showSuccessMessage: true,
+      showErrorMessage: true,
+      successMessage: "Cloud backup downloaded.",
+    })
   }
 
   const handleImportJson = async (event: React.ChangeEvent<HTMLInputElement>) => {

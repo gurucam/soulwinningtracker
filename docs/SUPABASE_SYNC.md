@@ -70,4 +70,5 @@ VITE_SUPABASE_ANON_KEY=YOUR_ANON_PUBLIC_KEY
 1. Open **Settings -> Cloud sync**.
 2. Create account or sign in.
 3. While signed in, data auto-saves to cloud after changes.
-4. On another device, sign in and click **Download from cloud** once to pull your latest cloud data.
+4. On another device, sign in to auto-pull the latest cloud backup.
+5. Use **Download from cloud** anytime to force a manual refresh from cloud.
