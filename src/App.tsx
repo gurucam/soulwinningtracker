@@ -3909,6 +3909,13 @@ const App = () => {
     })
     downloadCsv("soulwinning-salvations.csv", rows)
   }
+
+  const handleOpenCloudSyncSettings = () => {
+    setSettingsDetail(null)
+    setSettingsSection("sync")
+    setSettingsOpen(true)
+  }
+
   return (
     <div className="app">
       <header className="app-header">
@@ -3946,6 +3953,13 @@ const App = () => {
               More Stats
             </button>
           </div>
+          <button
+            className={`btn btn--compact ${authUserId ? "btn--soft" : "btn--primary"}`}
+            type="button"
+            onClick={handleOpenCloudSyncSettings}
+          >
+            {authUserId ? "Account" : "Sign in / Create account"}
+          </button>
           <button
             className="btn btn--ghost btn--compact"
             type="button"
