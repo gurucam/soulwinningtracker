@@ -9,7 +9,7 @@ This app now syncs through **Supabase Auth + per-user snapshots** in **Settings 
    - `Project URL`
    - `anon public key`
 
-## 2) Create the sync table and policies
+## 2) Create sync + feedback tables and policies
 In Supabase, open **SQL Editor** and run:
 
 ```sql
@@ -39,6 +39,28 @@ for update
 to authenticated
 using (auth.uid() = user_id)
 with check (auth.uid() = user_id);
+
+create table if not exists public.feedback_submissions (
+  id bigint generated always as identity primary key,
+  category text not null default 'general',
+  message text not null,
+  app_version text,
+  page_url text,
+  user_agent text,
+  user_id uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
+alter table public.feedback_submissions enable row level security;
+
+create policy "insert feedback (anon + auth)"
+on public.feedback_submissions
+for insert
+to anon, authenticated
+with check (
+  char_length(trim(message)) >= 4
+  and category in ('general', 'bug', 'idea')
+);
 ```
 
 ## 3) Configure email/password auth

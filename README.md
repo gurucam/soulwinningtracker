@@ -8,6 +8,7 @@ Local-first soulwinning logbook with tagged people, session tracking, flexible s
 - Filter stats by date range, week/month/year, and tags.
 - Export JSON backups for transfer and CSV for spreadsheets.
 - Optional cloud sync (Supabase Auth + per-user snapshot) for cross-device restore.
+- In-app anonymous feedback form (stored in Supabase, no GitHub login required).
 
 ## Quick start (web)
 1. Run `npm install`.

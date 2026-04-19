@@ -106,6 +106,7 @@ type GoalDefinition = {
 }
 
 type AuthViewMode = "signin" | "signup"
+type FeedbackCategory = "general" | "bug" | "idea"
 
 type StatsDetail =
   | {
@@ -156,7 +157,6 @@ const TAG_SEARCH_LIMIT = 12
 const TAG_DETAIL_PREVIEW_LIMIT = 3
 const STATS_SEARCH_LIMIT = 6
 const DEFAULT_GOALS: GoalDefinition[] = []
-const FEEDBACK_URL = "https://github.com/gurucam/SoulwinningTracker/issues/new"
 const SUPPORT_URL = "https://ko-fi.com/rrcam"
 const DEFAULT_STATS_VIEWS: StatsView[] = [
   {
@@ -642,6 +642,7 @@ const ROLLBACK_KEY = "soulwinning-tracker-rollback-v1"
 const THEME_MODE_KEY = "soulwinning_theme"
 const THEME_NAME_KEY = "soulwinning_theme_name"
 const SUPABASE_SNAPSHOT_TABLE = "user_snapshots"
+const SUPABASE_FEEDBACK_TABLE = "feedback_submissions"
 const AUTO_SYNC_DEBOUNCE_MS = 1500
 const EXCLUDED_THEME_IDS = new Set([
   "dark-souls-2",
@@ -915,6 +916,9 @@ const App = () => {
     message: string
     summary?: string
   } | null>(null)
+  const [feedbackCategory, setFeedbackCategory] = useState<FeedbackCategory>("general")
+  const [feedbackMessage, setFeedbackMessage] = useState("")
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false)
   const [statsDetail, setStatsDetail] = useState<StatsDetail | null>(null)
   const cloudSyncInFlightRef = useRef(false)
   const cloudSyncRetryQueuedRef = useRef(false)
@@ -1224,13 +1228,39 @@ const App = () => {
     api.installUpdate()
   }
 
-  const handleSubmitFeedback = () => {
-    const api = window.soulwinning
-    if (api?.openExternal) {
-      api.openExternal(FEEDBACK_URL)
+  const handleSubmitFeedback = async (event: React.FormEvent) => {
+    event.preventDefault()
+    clearMessages()
+
+    const message = feedbackMessage.trim()
+    if (message.length < 4) {
+      setActionError("Please enter at least 4 characters of feedback.")
       return
     }
-    window.open(FEEDBACK_URL, "_blank", "noopener")
+    if (!supabase || !isSupabaseConfigured) {
+      setActionError("Feedback is not configured for this deployment.")
+      return
+    }
+
+    setFeedbackSubmitting(true)
+    try {
+      const { error } = await supabase.from(SUPABASE_FEEDBACK_TABLE).insert({
+        category: feedbackCategory,
+        message,
+        app_version: appVersion || null,
+        page_url: typeof window === "undefined" ? null : window.location.href,
+        user_agent: typeof navigator === "undefined" ? null : navigator.userAgent,
+        user_id: authUserId || null,
+      })
+      if (error) throw error
+      setFeedbackMessage("")
+      setFeedbackCategory("general")
+      setActionMessage("Thanks. Feedback sent.")
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not send feedback.")
+    } finally {
+      setFeedbackSubmitting(false)
+    }
   }
 
   const handleOpenSupport = () => {
@@ -8135,7 +8165,54 @@ const App = () => {
                 {settingsSection === "feedback" ? (
                   <section className="panel panel--soft settings-section">
                     <h3>Submit Feedback</h3>
-                    <div className="note">Share feedback, bugs, or feature requests.</div>
+                    <div className="note">
+                      Send feedback right here. No sign-in or contact details required.
+                    </div>
+                    {!isSupabaseConfigured ? (
+                      <div className="empty-state">
+                        Feedback is not configured. Add `VITE_SUPABASE_URL` and
+                        `VITE_SUPABASE_ANON_KEY` to this deployment&apos;s environment variables.
+                      </div>
+                    ) : (
+                      <form className="form-grid" onSubmit={handleSubmitFeedback}>
+                        <label>
+                          Type
+                          <select
+                            value={feedbackCategory}
+                            onChange={(event) => setFeedbackCategory(event.target.value as FeedbackCategory)}
+                            disabled={feedbackSubmitting}
+                          >
+                            <option value="general">General feedback</option>
+                            <option value="bug">Bug report</option>
+                            <option value="idea">Feature idea</option>
+                          </select>
+                        </label>
+                        <label>
+                          Feedback
+                          <textarea
+                            value={feedbackMessage}
+                            onChange={(event) => setFeedbackMessage(event.target.value)}
+                            placeholder="What would you like changed or improved?"
+                            rows={5}
+                            maxLength={5000}
+                            disabled={feedbackSubmitting}
+                            required
+                          />
+                        </label>
+                        <div className="note-text">
+                          Sent anonymously. Please avoid sharing sensitive personal information.
+                        </div>
+                        <div className="form-actions">
+                          <button
+                            className="btn btn--primary"
+                            type="submit"
+                            disabled={feedbackSubmitting || loading}
+                          >
+                            {feedbackSubmitting ? "Sending..." : "Send feedback"}
+                          </button>
+                        </div>
+                      </form>
+                    )}
                     <div className="form-grid">
                       <div className="field-block">
                         <span>Data location</span>
@@ -8143,11 +8220,6 @@ const App = () => {
                           {userDataPath || "Local app data folder (path unavailable)."}
                         </div>
                       </div>
-                    </div>
-                    <div className="form-actions">
-                      <button className="btn btn--primary" type="button" onClick={handleSubmitFeedback}>
-                        Submit feedback
-                      </button>
                     </div>
                   </section>
                 ) : null}
