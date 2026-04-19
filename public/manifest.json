@@ -1,0 +1,16 @@
+{
+  "short_name": "Soulwinning",
+  "name": "Soulwinning Tracker",
+  "description": "Track your soulwinning events and salvations, set goals, and view statistics.",
+  "icons": [
+    {
+      "src": "/favicon.png",
+      "type": "image/png",
+      "sizes": "304x306"
+    }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#c56b3c",
+  "background_color": "#f6efe3"
+}

@@ -916,6 +916,9 @@ const App = () => {
     summary?: string
   } | null>(null)
   const [statsDetail, setStatsDetail] = useState<StatsDetail | null>(null)
+  const [isOffline, setIsOffline] = useState(() => 
+    typeof navigator !== "undefined" ? !navigator.onLine : false
+  )
   const cloudSyncInFlightRef = useRef(false)
   const cloudSyncRetryQueuedRef = useRef(false)
   const lastCloudUploadSignatureRef = useRef("")
@@ -2798,6 +2801,12 @@ const App = () => {
       showErrorMessage?: boolean
       successMessage?: string
     } = {}) => {
+      if (!navigator.onLine) {
+        if (showErrorMessage) {
+          setActionError("You are offline. Changes will sync when connection is restored.")
+        }
+        return false
+      }
       if (!supabase || !isSupabaseConfigured) {
         if (showErrorMessage) {
           setActionError("Supabase is not configured for this deployment.")
@@ -2944,6 +2953,12 @@ const App = () => {
       showErrorMessage?: boolean
       successMessage?: string
     } = {}) => {
+      if (!navigator.onLine) {
+        if (showErrorMessage) {
+          setActionError("You are offline. Cannot download cloud backup.")
+        }
+        return false
+      }
       if (!supabase || !isSupabaseConfigured) {
         if (showErrorMessage) {
           setActionError("Supabase is not configured for this deployment.")
@@ -3083,11 +3098,47 @@ const App = () => {
       })
     }, AUTO_SYNC_DEBOUNCE_MS)
     return () => window.clearTimeout(timer)
-  }, [appDataSnapshot, authLoading, authUserId, loading, syncLoading, uploadCloudSnapshot])
+  }, [appDataSnapshot, authLoading, authUserId, loading, syncLoading, uploadCloudSnapshot, isOffline])
 
+  useEffect(() => {
+    const updateNetworkStatus = () => {
+      if (typeof navigator !== "undefined") {
+        setIsOffline(!navigator.onLine)
+      }
+    }
+
+    window.addEventListener("online", updateNetworkStatus)
+    window.addEventListener("offline", updateNetworkStatus)
+
+    // Catch any changes that occurred between initial render and effect execution
+    updateNetworkStatus()
+
+    // Fallback polling: PWAs loading from Service Workers (and DevTools Offline mode)
+    // can sometimes silently flip navigator.onLine to false during boot without 
+    // reliably triggering the window 'offline' event.
+    const intervalId = setInterval(() => {
+      if (typeof navigator !== "undefined") {
+        setIsOffline((prev) => {
+          const currentOffline = !navigator.onLine
+          return prev !== currentOffline ? currentOffline : prev
+        })
+      }
+    }, 1000)
+
+    return () => {
+      window.removeEventListener("online", updateNetworkStatus)
+      window.removeEventListener("offline", updateNetworkStatus)
+      clearInterval(intervalId)
+    }
+  }, [])
+  
   const handleAuthSubmit = async (event: React.FormEvent) => {
     event.preventDefault()
     clearMessages()
+    if (!navigator.onLine) {
+      setActionError("You are offline. Please connect to the internet to sign in.")
+      return
+    }
     if (!supabase || !isSupabaseConfigured) {
       setActionError("Supabase is not configured for this deployment.")
       return
@@ -3124,6 +3175,10 @@ const App = () => {
 
   const handleSignOut = async () => {
     clearMessages()
+    if (!navigator.onLine) {
+      setActionError("You are offline. Please connect to the internet to sign out.")
+      return
+    }
     if (!supabase || !isSupabaseConfigured) {
       setActionError("Supabase is not configured for this deployment.")
       return
@@ -3147,6 +3202,10 @@ const App = () => {
 
   const handleCloudSyncUpload = async () => {
     clearMessages()
+    if (!navigator.onLine) {
+      setActionError("You are offline. Changes will sync when connection is restored.")
+      return
+    }
     if (syncLoading || authLoading) return
     await uploadCloudSnapshot({
       force: true,
@@ -3159,6 +3218,10 @@ const App = () => {
 
   const handleCloudSyncDownload = async () => {
     clearMessages()
+    if (!navigator.onLine) {
+      setActionError("You are offline. Cannot download cloud backup.")
+      return
+    }
     if (syncLoading || authLoading) return
     if (!authUserId) {
       setActionError("Sign in first to download a cloud backup.")
@@ -4376,7 +4439,12 @@ const App = () => {
   }
 
   return (
-    <div className="app">
+    <div className={`app ${isOffline ? "is-offline" : ""}`}>
+      {isOffline && (
+        <div className="offline-banner">
+          You are currently offline. Changes are saved locally and will sync when connection is restored.
+        </div>
+      )}
       <header className="app-header">
         <div className="brand">
           <div className="brand__title">Soulwinning Tracker</div>
